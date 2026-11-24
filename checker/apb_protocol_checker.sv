@@ -95,14 +95,14 @@ module apb_protocol_checker;
         if (psel) begin
           //Check 1
           if (penable) begin
-            $display ("[APB_ERROR][%s][%t] PSEL and PENABLE are asserted 1 in the SETUP phase\n", INST_NAME, $time);
+            uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSEL and PENABLE are asserted 1 in the SETUP phase\n", INST_NAME, $time));
           end
         end
       end
       ACCESS_CHECK: begin
         //Check 1
         if (~penable) begin
-          $display ("[APB_ERROR][%s][%t] PENABLE is not asserted 1 in the ACCESS phase\n", INST_NAME, $time);
+          uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PENABLE is not asserted 1 in the ACCESS phase\n", INST_NAME, $time));
         end
       end
     endcase
@@ -116,36 +116,36 @@ module apb_protocol_checker;
     if (preset_n & psel) begin
       //Check 2
       case (penable)
-        1'bx: $display ("[APB_ERROR][%s][%t] PENABLE is x\n", INST_NAME, $time);
-        1'bz: $display ("[APB_ERROR][%s][%t] PENABLE is z\n", INST_NAME, $time);
+        1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PENABLE is x\n", INST_NAME, $time));
+        1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PENABLE is z\n", INST_NAME, $time));
       endcase
       //Check 3
       case (pwrite)
-        1'bx: $display ("[APB_ERROR][%s][%t] PWRITE is x\n", INST_NAME, $time);
-        1'bz: $display ("[APB_ERROR][%s][%t] PWRITE is z\n", INST_NAME, $time);
+        1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PWRITE is x\n", INST_NAME, $time));
+        1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PWRITE is z\n", INST_NAME, $time));
       endcase
       //Check 4
       case (paddr_or)
-        1'bx: $display ("[APB_ERROR][%s][%t] PADDR is x\n", INST_NAME, $time);
-        1'bz: $display ("[APB_ERROR][%s][%t] PADDR is z\n", INST_NAME, $time);
+        1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PADDR is x\n", INST_NAME, $time));
+        1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PADDR is z\n", INST_NAME, $time));
       endcase
       //Check 5
       if (pwrite) begin
         case (pstrb_or)
-          1'bx: $display ("[APB_ERROR][%s][%t] PSTRB is x\n", INST_NAME, $time);
-          1'bz: $display ("[APB_ERROR][%s][%t] PSTRB is z\n", INST_NAME, $time);
+          1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSTRB is x\n", INST_NAME, $time));
+          1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSTRB is z\n", INST_NAME, $time));
         endcase
       end
       //Check 7
       case (pready)
-        1'bx: $display ("[APB_ERROR][%s][%t] PREADY is x\n", INST_NAME, $time);
-        1'bz: $display ("[APB_ERROR][%s][%t] PREADY is z\n", INST_NAME, $time);
+        1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PREADY is x\n", INST_NAME, $time));
+        1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PREADY is z\n", INST_NAME, $time));
       endcase
       //Check 8
       if (pready) begin
         case (pslverr)
-          1'bx: $display ("[APB_ERROR][%s][%t] PSLVERR is x\n", INST_NAME, $time);
-          1'bz: $display ("[APB_ERROR][%s][%t] PSLVERR is z\n", INST_NAME, $time);
+          1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSLVERR is x\n", INST_NAME, $time));
+          1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSLVERR is z\n", INST_NAME, $time));
         endcase
       end
       //Check 6
@@ -167,8 +167,8 @@ module apb_protocol_checker;
     end
     //Check 10
     case (psel)
-      1'bx: $display ("[APB_ERROR][%s][%t] PSEL is x\n", INST_NAME, $time);
-      1'bz: $display ("[APB_ERROR][%s][%t] PSEL is z\n", INST_NAME, $time);
+      1'bx: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSEL is x\n", INST_NAME, $time));
+      1'bz: uvm_pkg::uvm_report_error("APB_PROTOCOL", $sformatf("[APB_ERROR][%s][%t] PSEL is z\n", INST_NAME, $time));
     endcase
   end
   //

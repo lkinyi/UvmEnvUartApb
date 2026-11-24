@@ -73,7 +73,7 @@ class cApbMasterReadSeq extends uvm_sequence#(cApbTransaction);
 		finish_item(coApbTransaction);
     //Compare the actual data and the expected data
     compareResult = (coApbTransaction.prdata ^ expectedReadData) & mask;
-    if (compareResult) begin
+    if (compareResult !== 32'd0) begin
       `uvm_error("READ FAIL", $sformatf("Address: %8h, Expected data: %8h, Actual data: %8h, Mask: %8h", addr, expectedReadData, coApbTransaction.prdata, mask));
     end
 	endtask

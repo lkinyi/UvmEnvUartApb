@@ -52,7 +52,7 @@ class cScoreboard extends uvm_scoreboard;
    endfunction
    //Check the reset status
    //On reset: forget all data in flight and clear both enable flags
-   function void write_resetfrmTX (logic preset_n);
+   virtual function void write_resetfrmTX (logic preset_n);
      if (~preset_n) begin
        rst_flg = 1'b1;
        queueTransTX.delete();
@@ -101,22 +101,26 @@ class cScoreboard extends uvm_scoreboard;
      end
    endfunction
    //
-   function void write_frmMonitorTX(cApbTransaction TransOnTX);
+   virtual function void write_frmMonitorTX(cApbTransaction TransOnTX);
      check_uart("TX", TransOnTX, uartEnTX, queueTransTX, queueTransRX);
    endfunction
    //
-   function void write_frmMonitorRX(cApbTransaction TransOnRX);
+   virtual function void write_frmMonitorRX(cApbTransaction TransOnRX);
      check_uart("RX", TransOnRX, uartEnRX, queueTransRX, queueTransTX);
    endfunction
    //
-   function void report_phase(uvm_phase phase);
-     super.report_phase(phase);
+   function void check_phase(uvm_phase phase);
+     super.check_phase(phase);
      if (queueTransTX.size() != 0) begin
        `uvm_error("SB UNFINISH-TX", $sformatf("Data sent by UART-TX was never received by UART-RX, pending data: %0d", queueTransTX.size()))
      end
      if (queueTransRX.size() != 0) begin
        `uvm_error("SB UNFINISH-RX", $sformatf("Data sent by UART-RX was never received by UART-TX, pending data: %0d", queueTransRX.size()))
      end
+   endfunction
+
+   function void report_phase(uvm_phase phase);
+     super.report_phase(phase);
      `uvm_info("SB SUMMARY", $sformatf("data compares: %0d passed, %0d failed", cntCompareOk, cntCompareErr), UVM_NONE)
    endfunction
 

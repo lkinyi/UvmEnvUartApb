@@ -44,8 +44,11 @@ WALL_TIMEOUT ?= 1800
 COV         ?= 0
 WAVE        ?= 0
 UVM_HOME    ?=
+BUILD_DIR   ?= build
+PLUSARGS    ?=
 
 OPTS := --platform $(PLATFORM_R) --sim $(SIM) --jobs $(JOBS) --timeout-ns $(TIMEOUT_NS) --wall-timeout $(WALL_TIMEOUT)
+OPTS += --build-dir "$(BUILD_DIR)" $(foreach p,$(PLUSARGS),--plusarg $(p))
 ifneq ($(UVM_HOME),)
   OPTS += --uvm-home $(UVM_HOME)
 endif

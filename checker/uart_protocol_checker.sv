@@ -72,8 +72,8 @@ module uart_protocol_checker;
   always @ (posedge pclk) begin
     if (preset_n) begin
       case (uart_net)
-        1'bx: $display ("[UART_ERROR][%t][%s] %s is x\n", $time, INST_NAME, INST_NET);
-        1'bz: $display ("[UART_ERROR][%t][%s] %s is z\n", $time, INST_NAME, INST_NET);
+        1'bx: uvm_pkg::uvm_report_error("UART_PROTOCOL", $sformatf("[UART_ERROR][%t][%s] %s is x\n", $time, INST_NAME, INST_NET));
+        1'bz: uvm_pkg::uvm_report_error("UART_PROTOCOL", $sformatf("[UART_ERROR][%t][%s] %s is z\n", $time, INST_NAME, INST_NET));
       endcase
     end
   end
@@ -98,7 +98,7 @@ module uart_protocol_checker;
   // (2) FSM detect a UART frame
   //-------------------------------------------------
   //Synchronize the UART net
-  // Detect the rising edge 
+  // Detect the rising edge
   // Detect the falling edge
   always @ (posedge pclk, negedge preset_n) begin
     if (~preset_n) uart_net_sync <= `DLYCHK 1'b1;
@@ -151,7 +151,11 @@ module uart_protocol_checker;
   // Timing (Pulse width) checking
   //-------------------------------------------------
   always @ (posedge pclk) begin
-    if (preset_n & next_bit)
+    // Seed this frame's START value; the previous STOP value is not a valid
+    // reference for the new frame. Keep all subsequent bit-width checks active.
+    if (!preset_n)
+      bitCheckedValue <= `DLYCHK 1'b1;
+    else if (frame_start | next_bit)
       bitCheckedValue <= `DLYCHK uart_net;
   end
   assign baud_rate_error = (bitCheckedValue != uart_net_sync) & chk_uart_state;
@@ -176,7 +180,7 @@ module uart_protocol_checker;
   //
   always @ (posedge pclk, negedge preset_n) begin
     if (preset_n & baud_rate_error_rising) begin
-      $display ("[UART_ERROR][%t][%s] %s Bit width is violated  \n-- Expected bit value: %b\n-- Actual bit value: %b", $time, INST_NAME, INST_NET, bitCheckedValue, uart_net_sync);
+      uvm_pkg::uvm_report_error("UART_PROTOCOL", $sformatf("[UART_ERROR][%t][%s] %s Bit width is violated  \n-- Expected bit value: %b\n-- Actual bit value: %b", $time, INST_NAME, INST_NET, bitCheckedValue, uart_net_sync));
     end
   end
   //-------------------------------------------------
@@ -197,7 +201,7 @@ module uart_protocol_checker;
   //-------------------------------------------------
   final begin
     if (baud_rate_error_report) begin
-      $display ("[UART_ERROR][%s][%s] Bit width is violated  ", $time, INST_NAME, INST_NET); 
+      uvm_pkg::uvm_report_error("UART_PROTOCOL", $sformatf("[UART_ERROR][%t][%s] %s Bit width is violated  ", $time, INST_NAME, INST_NET));
     end
   end
 endmodule

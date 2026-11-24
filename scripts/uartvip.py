@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import glob
+import hashlib
 import json
 import os
 import re
@@ -33,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -198,9 +200,13 @@ def cmd_gen(_a, _p) -> int:
         body = re.sub(r"\bcVSequence\b", f"cVSeq_{i}", body).replace("@@HDR@@", f"cVSeq_{i} extends cVSequence")
         (gen / f"pat_{i}.svh").write_text(body, encoding="utf-8", newline="\n")
         inc.append(f'`include "pat_{i}.svh"')
+        base_file = d / "test_base.txt"
+        base = base_file.read_text().strip() if base_file.exists() else "cTest"
+        if base not in ("cTest", "cRxFifoTest"):
+            raise SystemExit(f"gen: unsupported test base {base!r} in {d}")
         cls.append(f"""
   // Test of pattern pat/{d.name}
-  class test_{i} extends cTest;
+   class test_{i} extends {base};
     `uvm_component_utils(test_{i})
     function new (string name = "test_{i}", uvm_component parent = null);
       super.new(name, parent);
@@ -318,6 +324,16 @@ def exe_path(a, plat: Platform) -> Path:
     return BUILD / a.sim / ("obj" if a.sim == "verilator" else "work") / (f"VtestTop{plat.exe}" if a.sim == "verilator" else "")
 
 
+def source_hashes() -> dict:
+    """Lock all local compile inputs, including generated library and test bases."""
+    paths = []
+    for directory in ("dut", "checker", "uvm_comp", "sim", "pat"):
+        paths.extend(p for p in (ROOT / directory).rglob("*")
+                     if p.is_file() and (p.suffix in (".v", ".sv", ".svh", ".h") or p.name in ("SKIP", "test_base.txt")))
+    paths.extend((BUILD / "gen").glob("*.svh"))
+    return {posix(os.path.relpath(p, ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
+
+
 def cmd_build(a, plat: Platform) -> int:
     env = plat.env()
     uvm = resolve_uvm(plat, a.uvm_home)
@@ -339,11 +355,11 @@ def cmd_build(a, plat: Platform) -> int:
         obj.parent.mkdir(parents=True, exist_ok=True)   # Verilator creates one directory level only
         cmd = [vl, "--binary", "--timing", "-j", str(a.jobs), "--timescale", "1ns/1ns",
                "-Wno-fatal", "-Wno-lint", "-Wno-style", "-Wno-WIDTH", "-Wno-CASEINCOMPLETE", "-Wno-IMPLICIT",
-               "--Mdir", posix(obj), "--top-module", "testTop"]
+               "--Mdir", posix(obj), "--top-module", "testTop", "--output-groups", "8"]
         if gxx_major(env) >= 16:
             cmd += ["-CFLAGS", "-O1"]            # gcc 16 with -Os fails to link the Verilator runtime
         if a.cov:
-            cmd += ["--coverage"]
+            cmd += ["--coverage-user"]  # functional covergroups; no code coverage denominator
         if a.wave:
             cmd += ["--trace", "-DWAVE"]
         cmd += opts + [posix(uvm / "uvm_pkg.sv")] + files   # Verilator wants the package first
@@ -369,6 +385,12 @@ def cmd_build(a, plat: Platform) -> int:
     if not ok:
         for ln in [x for x in out.splitlines() if re.search(r"%Error|\berror\b|undefined reference", x)][:6]:
             print("   ", ln[:200])
+    if ok:
+        manifest = {"sources": source_hashes(), "sim": a.sim, "wave": a.wave, "cov": a.cov,
+                    "command": cmd, "uvm": str(uvm), "log": str(log), "build_exit": rc}
+        if a.sim == "verilator":
+            manifest["binary_sha256"] = hashlib.sha256(exe_path(a, plat).read_bytes()).hexdigest()
+        (BUILD / "build_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return 0 if ok else 1
 
 
@@ -378,6 +400,12 @@ def parse_result(text: str, rc: int, wall: bool) -> dict:
     failed = re.search(r"\*\* TEST FAILED \*\*(.*)", text)
     m_err = re.search(r"UVM_ERROR\s*:\s*(\d+)", text)
     res["uvm_errors"] = int(m_err.group(1)) if m_err else None
+    m_fatal = re.search(r"UVM_FATAL\s*:\s*(\d+)", text)
+    res["uvm_fatals"] = int(m_fatal.group(1)) if m_fatal else None
+    checker_errors = re.findall(r"\[(?:APB|UART)_ERROR\]", text)
+    res["protocol_checker_errors"] = len(checker_errors)
+    live_errors = re.findall(r"^UVM_(?:ERROR|FATAL)\s+(?!\s*:).+", text, re.M)
+    res["error_messages"] = live_errors
     sim_err = re.search(r"%Error[^\n]*", text)
     if wall:
         res["reason"] = "wall-clock timeout"
@@ -396,28 +424,111 @@ def parse_result(text: str, rc: int, wall: bool) -> dict:
         res["reason"] = f"exit code {rc}"
     elif res["uvm_errors"]:
         res["reason"] = f"{res['uvm_errors']} UVM_ERROR"
+    elif res["uvm_fatals"] or live_errors or checker_errors:
+        res["reason"] = "checker/UVM error in complete simulator output"
+    elif m_err is None or m_fatal is None:
+        res["reason"] = "missing UVM error/fatal totals"
     else:
         res["status"] = "PASS"
     res["compares_ok"] = int(m.group(1)) if (m := re.search(r"(\d+) passed, \d+ failed", text)) else None
+    summary = re.search(r"\[RX_FIFO_SUMMARY\] ([^\n]+)", text)
+    if summary:
+        res["rx_fifo"] = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", summary.group(1))}
+    irq_summary = re.search(r"\[RX_IRQ_SUMMARY\] ([^\n]+)", text)
+    if irq_summary:
+        res["irq"] = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", irq_summary.group(1))}
+        res["functional_events"] = {int(i): int(n) for i,n in re.findall(r"\[RX_FC_EVENT\] id=(\d+) hits=(\d+)", text)}
+        res["functional_cross"] = {f"{s}:{i}": int(n) for s,i,n in re.findall(r"\[RX_FC_CROSS\] source=(\d+) ie=(\d+) hits=(\d+)", text)}
+        res["tp07_hits"] = {int(i): int(n) for i,n in re.findall(r"\[RX_TP07_HIT\] id=(\d+) hits=(\d+)", text)}
+        if (res["irq"].get("cycles", 0) == 0 or res["irq"].get("errors") != 0) and res["status"] == "PASS":
+            res.update(status="FAIL", reason="missing/failed IRQ comparisons")
+    if re.search(r"Running test test_rx_fifo_tp07", text):
+        q=res.get("irq", {})
+        valid=bool(irq_summary) and len(res.get("functional_events", {}))==52
+        valid=valid and len(res.get("tp07_hits", {}))==14 and all(n==1 for n in res.get("tp07_hits", {}).values())
+        valid=valid and q.get("rises",0)>=4 and q.get("falls",0)>=4 and q.get("holds",0)>0 and q.get("merge_holds")==1
+        if not valid and res["status"]=="PASS":
+            res.update(status="FAIL",reason="missing/unmet TP07 IRQ/scenario contract")
+    stage2_summary = re.search(r"\[RX_STAGE2_SUMMARY\] ([^\n]+)", text)
+    if stage2_summary:
+        res["rx_stage2"] = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", stage2_summary.group(1))}
+        res["rxt_hits"] = [{k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", row)}
+                           for row in re.findall(r"\[RX_STAGE2_RXT\] (rxt=[^\n]+)", text)]
+        res["ie_hits"] = [{k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", row)}
+                          for row in re.findall(r"\[RX_STAGE2_IE\] (source=[^\n]+)", text)]
+    if re.search(r"Running test test_rx_fifo_", text):
+        contract = re.search(r"\[RX_CONTRACT\] ([^\n]+)", text)
+        expected = dict(re.findall(r"required_(\w+)=(\d+)", contract.group(1))) if contract else {}
+        actual = res.get("rx_fifo", {})
+        pairs = {"frames": "completed", "accepts": "accepted", "rejects": "rejected",
+                 "pops": "popped", "empty": "empty_reads", "holds": "holds"}
+        res["rx_contract"] = {k: int(v) for k, v in expected.items()}
+        valid = bool(contract and summary) and set(expected) == set(pairs)
+        valid = valid and all(actual.get(pairs[k]) == int(v) for k, v in expected.items())
+        valid = valid and actual.get("finalized") == 1 and actual.get("errors") == 0
+        valid = valid and actual.get("state_checks", 0) > 0 and actual.get("status_compares", 0) > 0
+        if valid:
+            frames, pops, drops = int(expected["frames"]), int(expected["pops"]), int(expected["rejects"])
+            valid = frames > 0 and pops > 0 and int(expected["holds"]) > 0
+            valid = valid and all(actual.get(k) == frames for k in ("sent", "pin_started", "pin_completed", "pin_compares"))
+            flushed = res.get("rx_stage2", {}).get("flushed", 0)
+            valid = valid and actual.get("data_compares") == pops and actual.get("accepted") == pops + flushed
+            valid = valid and actual.get("accepted", 0) + actual.get("rejected", 0) == frames
+            valid = valid and 0 < actual.get("max_occupancy", 0) <= 16 and actual.get("overflow_hits") == drops
+            if drops:
+                valid = valid and actual.get("max_occupancy") == 16 and actual.get("boundary15", 0) > 0 and actual.get("boundary16", 0) > 0
+        if not valid and res["status"] == "PASS":
+            res.update(status="FAIL", reason="missing/unmet RX FIFO completion/check contract")
+        stage2_test = re.search(r"Running test test_rx_fifo_(tp0[456])", text)
+        if stage2_test:
+            scenario = stage2_test.group(1)
+            s = res.get("rx_stage2", {})
+            levels = {r["rxt"]: r for r in res.get("rxt_hits", [])}
+            sources = {(r["source"], r["ie"]): r["hits"] for r in res.get("ie_hits", [])}
+            valid = bool(stage2_summary) and len(levels) == 4 and len(sources) == 12
+            valid = valid and all(s.get(k, 0) > 0 for k in ("raw_compares", "masked_compares", "con_compares", "ie_compares", "rxf_rises", "rxf_falls"))
+            valid = valid and s.get("flushed") == s.get("required_flushed") == (16 if scenario == "tp06" else 0)
+            if valid and scenario == "tp04":
+                valid = all(all(levels[r].get(k) == 1 for k in ("below", "at", "down"))
+                            and levels[r].get("above") == (0 if r == 0 else 1)
+                            and levels[r].get("dynamic", 0) > 0 for r in range(4))
+                valid = valid and s["rxf_rises"] >= 6 and s["rxf_falls"] >= 6
+            if valid and scenario == "tp05":
+                valid = all(levels[r].get("capacity") == 1 and levels[r].get("continued") == 16-(16>>r) for r in (1, 2, 3))
+                valid = valid and s.get("ov_rises") == 0
+            if valid and scenario == "tp06":
+                valid = all(sources.get((src, ie), 0) >= 2 for src in (2, 4, 6) for ie in (0, 2, 4, 6))
+                valid = valid and s.get("ie_compares", 0) >= 31 and s.get("ov_rises") == s.get("ov_falls") == 2
+            if not valid and res["status"] == "PASS":
+                res.update(status="FAIL", reason="missing/unmet Stage2 transition/source/enable hit contract")
     return res
 
 
 def run_one(a, plat: Platform, test: str, seed: int) -> dict:
     env = plat.env()
     name = test if test.startswith("test_") else f"test_{ident(test)}"
-    logs = BUILD / "logs"
-    log = logs / f"{name}.s{seed}.log"
+    run_id = f"{name}.s{seed}.{time.time_ns()}.{uuid.uuid4().hex[:6]}"
+    cwd = BUILD / "runs" / run_id
+    cwd.mkdir(parents=True, exist_ok=False)
+    log = cwd / "simulator.log"
+    coverage_file = cwd / ("coverage.dat" if a.sim == "verilator" else "coverage.ucdb")
+    manifest_file = BUILD / "build_manifest.json"
+    if not manifest_file.exists():
+        return {"test": name, "seed": seed, "status": "FAIL", "reason": "missing build manifest; rebuild in an isolated --build-dir", "wall": 0}
+    manifest = json.loads(manifest_file.read_text())
+    if manifest["sources"] != source_hashes() or any(manifest[k] != getattr(a, k) for k in ("sim", "wave", "cov")):
+        return {"test": name, "seed": seed, "status": "FAIL", "reason": "stale source/build options; rebuild", "wall": 0}
     t0 = time.time()
     if a.sim == "verilator":
         exe = exe_path(a, plat)
         if not exe.is_file():
             return {"test": name, "seed": seed, "status": "FAIL", "reason": "not built (run: build)", "wall": 0}
+        if hashlib.sha256(exe.read_bytes()).hexdigest() != manifest.get("binary_sha256"):
+            return {"test": name, "seed": seed, "status": "FAIL", "reason": "binary hash differs from build manifest", "wall": 0}
         cmd = [str(exe), f"+UVM_TESTNAME={name}", f"+UVM_VERBOSITY={a.verbosity}", f"+verilator+seed+{seed}",
                "+verilator+rand+reset+2", f"+TIMEOUT_NS={a.timeout_ns}", "+UVM_NO_RELNOTES"]
         if a.cov:
-            (BUILD / "cov").mkdir(parents=True, exist_ok=True)
-            cmd.append(f"+verilator+coverage+file+{posix(BUILD / 'cov' / (name + f'.s{seed}.dat'))}")
-        cwd = BUILD / "verilator"
+            cmd.append(f"+verilator+coverage+file+{posix(coverage_file)}")
     else:
         vsim = plat.which(["vsim", "vsim.exe"], env)
         if not vsim:
@@ -427,15 +538,42 @@ def run_one(a, plat: Platform, test: str, seed: int) -> dict:
         if not vsim:
             return {"test": name, "seed": seed, "status": "FAIL", "reason": "vsim not found", "wall": 0}
         work = BUILD / "questa" / "work"
-        do = "run -all; quit -f" if not a.cov else f"coverage save -onexit {posix(BUILD / 'cov' / (name + f'.s{seed}.ucdb'))}; run -all; quit -f"
+        do = "run -all; quit -f" if not a.cov else f"coverage save -onexit {posix(coverage_file)}; run -all; quit -f"
         (BUILD / "cov").mkdir(parents=True, exist_ok=True)
         cmd = [vsim, "-c", "-novopt", "-work", posix(work), "work.testTop", f"+UVM_TESTNAME={name}", f"+UVM_VERBOSITY={a.verbosity}",
                f"+TIMEOUT_NS={a.timeout_ns}", "-sv_seed", str(seed), *(["-coverage"] if a.cov else []), "-do", do]
-        cwd = BUILD / "questa"
+    cmd.extend("+" + value.lstrip("+") for value in a.plusarg)
     cwd.mkdir(parents=True, exist_ok=True)
+    (cwd / "command.json").write_text(json.dumps({"command": cmd, "cwd": str(cwd), "build_manifest": str(manifest_file), "seed": seed}, indent=2), encoding="utf-8")
     rc, out = run_cmd(cmd, env, cwd, log, timeout=a.wall_timeout)
     res = parse_result(out, rc, rc == 124)
-    res.update({"test": name, "seed": seed, "wall": round(time.time() - t0, 1), "log": posix(log.relative_to(ROOT))})
+    res.update({"test": name, "seed": seed, "wall": round(time.time() - t0, 1), "sim_exit": rc,
+                "log": posix(log.relative_to(ROOT)), "run_dir": posix(cwd.relative_to(ROOT)),
+                "wave": posix((cwd / "wave.vcd").relative_to(ROOT)) if (cwd / "wave.vcd").exists() else None})
+    res["build_identity"] = {"manifest": posix(manifest_file.relative_to(ROOT)),
+                             "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
+                             "binary_sha256": manifest.get("binary_sha256"), "cov": a.cov, "wave": a.wave}
+    res["coverage"] = posix(coverage_file.relative_to(ROOT)) if coverage_file.exists() else None
+    if a.cov and not res["coverage"] and res["status"]=="PASS":
+        res.update(status="FAIL",reason="required coverage database missing")
+    if name.startswith("test_rx_fifo_"):
+        res["configuration"] = {"direction": "UART0->UART1", "pclk_ns": [50, 86], "BR": [130, 75],
+                                "EN": 1, "D9": 0, "EP": 0, "TXT": 0, "RXT": 0, "IE": 0, "capacity": 16,
+                                "timeout_ns": a.timeout_ns, "plusargs": a.plusarg,
+                                "values_are": "test configuration contract",
+                                "setup_checkpoint_reached": "[RX_MILESTONE] initial_empty" in out}
+        if name in ("test_rx_fifo_tp04", "test_rx_fifo_tp05", "test_rx_fifo_tp06", "test_rx_fifo_tp07"):
+            res["configuration"].update(RXT="runtime shadow; see RXT hits and milestones",
+                                        IE="0/2/4/6 plus reserved high bits" if name.endswith("tp06") else 0,
+                                        EN="1; bounded quiet disable for OV-only setup" if name.endswith("tp06") else 1)
+            if name.endswith("tp07"):
+                res["configuration"].update(RXT="11 then 01 (2 then 8)",IE="0/2/4/6; see IRQ checkpoints")
+    elif name == "test_baudrate_9600_complete":
+        res["configuration"] = {"direction":"UART0->UART1", "pclk_ns":[50,86], "BR":[130,75],
+            "EN":1,"D9":0,"EP":0,"TXT":0,"RXT":0,"IE":0,"frames":24,
+            "scoreboard":"legacy ordered queue with COMPLETE_CHECK pending=0",
+            "timeout_ns":a.timeout_ns,"plusargs":a.plusarg}
+    (cwd / "result.json").write_text(json.dumps(res, indent=2), encoding="utf-8")
     return res
 
 
@@ -471,25 +609,57 @@ def cmd_regress(a, plat: Platform) -> int:
 
 def cmd_cov(a, plat: Platform) -> int:
     env = plat.env()
-    cov = BUILD / "cov"
+    manifest_file = BUILD / "build_manifest.json"
+    if not manifest_file.exists():
+        print("cov: FAIL (missing build manifest)")
+        return 1
+    manifest = json.loads(manifest_file.read_text())
+    if not manifest.get("cov") or manifest["sources"] != source_hashes():
+        print("cov: FAIL (un-instrumented or stale build)")
+        return 1
+    identity = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
+    inputs, excluded = [], []
+    for result_file in sorted((BUILD / "runs").glob("*/result.json")):
+        r = json.loads(result_file.read_text())
+        valid = r.get("status") == "PASS" and r.get("sim_exit") == 0
+        valid = valid and r.get("build_identity", {}).get("manifest_sha256") == identity
+        valid = valid and r.get("coverage") and (ROOT / r["coverage"]).is_file()
+        valid = valid and not any("SELFTEST" in p or "IRQ_FAULT=" in p for p in r.get("configuration", {}).get("plusargs", []))
+        if valid:
+            p = ROOT / r["coverage"]
+            inputs.append({"file": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "result": str(result_file)})
+        else:
+            excluded.append(str(result_file))
+    if not inputs:
+        print("cov: NOT_RUN (no qualified current-build PASS databases)")
+        return 2
+    cov = BUILD / "cov" / ("merge-" + str(time.time_ns()))
+    cov.mkdir(parents=True, exist_ok=False)
+    (cov / "inputs.json").write_text(json.dumps({"build_manifest_sha256": identity, "inputs": inputs, "excluded": excluded}, indent=2))
     if a.sim == "verilator":
         tool = plat.which(plat.coverage_names, env)
-        dats = sorted(glob.glob(str(cov / "*.dat")))
+        dats = [x["file"] for x in inputs]
         if not tool or not dats:
             print("cov: NOT_RUN (needs verilator_coverage and .dat files; build and run with --cov)")
             return 2
         merged = cov / "merged.dat"
-        run_cmd([tool, "--write", posix(merged), *map(posix, dats)], env, ROOT)
-        rc, out = run_cmd([tool, "--annotate", posix(cov / "annotate"), "--annotate-min", "1", posix(merged)], env, ROOT, BUILD / "logs" / "cov.log")
-        print(f"cov: merged {len(dats)} run(s); annotated source in build/cov/annotate; summary:")
+        rc, _ = run_cmd([tool, "--write", posix(merged), *map(posix, dats)], env, ROOT, cov / "merge.log")
+        if rc != 0:
+            return 1
+        # This build collects functional bins. Export without reopening source:
+        # 5.052 annotation mishandles encoded non-ASCII workspace paths.
+        rc, out = run_cmd([tool, "--write-info", posix(cov / "functional.info"), posix(merged)], env, ROOT, cov / "report.log")
+        print(f"cov: merged {len(dats)} qualified run(s); native bins: {posix(merged)}; export: {posix(cov / 'functional.info')}")
         print("   " + "\n   ".join(out.strip().splitlines()[:6]))
         return 0 if rc == 0 else 1
     vcover = plat.which(["vcover", "vcover.exe"], env)
-    ucdbs = sorted(glob.glob(str(cov / "*.ucdb")))
+    ucdbs = [x["file"] for x in inputs]
     if not vcover or not ucdbs:
         print("cov: NOT_RUN (needs vcover and .ucdb files)")
         return 2
-    run_cmd([vcover, "merge", posix(cov / "merged.ucdb"), *map(posix, ucdbs)], env, ROOT)
+    rc, _ = run_cmd([vcover, "merge", posix(cov / "merged.ucdb"), *map(posix, ucdbs)], env, ROOT, cov / "merge.log")
+    if rc != 0:
+        return 1
     rc, _ = run_cmd([vcover, "report", "-html", "-htmldir", posix(cov / "html"), "-code", "bcestf", "-cvg", posix(cov / "merged.ucdb")], env, ROOT)
     print("cov: report in build/cov/html")
     return rc
@@ -522,6 +692,7 @@ COMMANDS = {"doctor": cmd_doctor, "lint": cmd_lint, "check": cmd_check, "gen": c
 
 
 def main() -> int:
+    global BUILD
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=list(COMMANDS))
     ap.add_argument("--platform", default=os.environ.get("PLATFORM", "auto"), choices=["auto", "windows", "linux"])
@@ -538,7 +709,10 @@ def main() -> int:
     ap.add_argument("--cov", action="store_true")
     ap.add_argument("--wave", action="store_true", help="Verilator: write build/verilator/wave.vcd")
     ap.add_argument("--strict", action="store_true", help="lint: warnings fail")
+    ap.add_argument("--build-dir", default="build", help="isolated build/evidence root, relative to project or absolute")
+    ap.add_argument("--plusarg", action="append", default=[], help="extra simulator plusarg (repeatable)")
     a = ap.parse_args()
+    BUILD = (ROOT / a.build_dir).resolve()
     plat = Platform(a.platform)
     return COMMANDS[a.command](a, plat)
 

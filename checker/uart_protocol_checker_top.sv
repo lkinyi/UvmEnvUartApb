@@ -40,7 +40,7 @@ module uart_protocol_checker_top;
     assign uart1_chk.paddr    = `uart1_if.paddr_1;
     assign uart1_chk.pwdata   = `uart1_if.pwdata_1;
     assign uart1_chk.pstrb    = `uart1_if.pstrb_1;
-    assign uart1_chk.pready   = `uart1_if.pready_0;
+    assign uart1_chk.pready   = `uart1_if.pready_1;
     assign uart1_chk.uart_net = `uart1_if.uart_1to0;
     
 endmodule

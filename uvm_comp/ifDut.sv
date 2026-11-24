@@ -19,7 +19,7 @@ interface ifApbMaster;
   logic        pready;
   logic        pslverr;
 endinterface: ifApbMaster
-//Interrupt interface 
+//Interrupt interface
 interface ifInterrupt;
   `ifdef INTERRUPT_COM
     logic ctrl_if;
@@ -27,7 +27,7 @@ interface ifInterrupt;
     logic ctrl_tif;
     logic ctrl_rif;
     logic ctrl_pif;
-    logic ctrl_oif;  
+    logic ctrl_oif;
     logic ctrl_fif;
    `endif
 endinterface: ifInterrupt
@@ -36,3 +36,12 @@ interface ifUart (input logic pclk, input logic preset_n);
   logic uart_tx;
   logic uart_rx;
 endinterface: ifUart
+
+// Passive verification-only view; no signal here drives a DUT input.
+interface ifRxFifoProbe;
+  wire pclk, preset_n, serial_rx;
+  wire rx_complete, fifo_we, fifo_re, fifo_empty, fifo_full;
+  wire rx_ne, rx_rxf, rx_ov;
+  wire irq;
+  wire [4:0] wptr, rptr;
+endinterface
